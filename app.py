@@ -5,6 +5,11 @@ import copy
 import csv
 import itertools
 from collections import Counter, deque
+from ctypes import cast, POINTER
+from comtypes import CLSCTX_ALL
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import math
+import keyboard
 
 import cv2 as cv
 import mediapipe as mp
@@ -39,6 +44,36 @@ def get_args():
 def main():
     # Argument parsing
     args = get_args()
+    
+    # --- CẤU HÌNH ĐIỀU KHIỂN ---
+    global debug_image
+    debug_image = None
+    control_enabled = True  # Toggle bật/tắt
+    smooth_distance = 0
+    alpha = 0.2  # Hệ số làm mượt (càng nhỏ càng chậm/mượt, từ 0 đến 1)
+
+# --- ĐOẠN CODE KHỞI TẠO CHUẨN (Thay thế đoạn cũ) ---
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, EDataFlow, ERole
+    from comtypes import CLSCTX_ALL
+    from ctypes import cast, POINTER
+
+    volume = None
+    min_vol, max_vol = -65.25, 0.0
+
+    try:
+        # Lấy Enumerator để truy cập thiết bị
+        device_enumerator = AudioUtilities.GetDeviceEnumerator()
+        # Lấy thiết bị phát mặc định (Multimedia)
+        default_device = device_enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender.value, ERole.eMultimedia.value)
+        # Kích hoạt Interface điều khiển âm lượng
+        interface = default_device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        volume = cast(interface, POINTER(IAudioEndpointVolume))
+        
+        vol_range = volume.GetVolumeRange()
+        min_vol, max_vol = vol_range[0], vol_range[1]
+        print("Khởi tạo âm thanh thành công!")
+    except Exception as e:
+        print(f"Lỗi khởi tạo nghiêm trọng: {e}")
 
     cap_device = args.device
     cap_width = args.width
@@ -94,15 +129,37 @@ def main():
     finger_gesture_history = deque(maxlen=history_length)
 
     mode = 0
+    number = -1
+    control_enabled = True
+    debug_image = None
+    smooth_distance = 0  # Đảm bảo có biến này để tránh NameError
+    alpha = 0.2
+    m_pressed = False
+    active_hand_id = None 
 
     while True:
         fps = cvFpsCalc.get()
 
+        # Trong vòng lặp while True:
+        if keyboard.is_pressed('m'):
+            if not m_pressed:
+                control_enabled = not control_enabled
+                m_pressed = True
+        else:
+            m_pressed = False
+
         # Process Key (ESC: end)
-        key = cv.waitKey(10)
+        key = cv.waitKey(1) & 0xFF
         if key == 27:  # ESC
             break
-        number, mode = select_mode(key, mode)
+        if key == ord('m'):
+            if not m_pressed:
+                control_enabled = not control_enabled
+                # Cập nhật thông báo ngay lập tức
+                status_text = "CONTROL: ON" if control_enabled else "CONTROL: OFF"
+                m_pressed = True
+        else:
+            m_pressed = False # Chỉ mở khóa khi đã nhả phím (key không còn là 'm')
 
         # Camera capture
         ret, image = cap.read()
@@ -119,12 +176,60 @@ def main():
         image.flags.writeable = True
 
         if results.multi_hand_landmarks is not None:
-            for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
-                                                  results.multi_handedness):
+            # Lấy danh sách ID của các tay đang có mặt trong khung hình hiện tại
+            current_hand_ids = []
+            if results.multi_handedness:
+                for hand_info in results.multi_handedness:
+                    # MediaPipe cung cấp index định danh duy nhất cho mỗi bàn tay
+                    current_hand_ids.append(hand_info.classification[0].index)
+
+            if active_hand_id not in current_hand_ids:
+                active_hand_id = None
+
+            for handedness, hand_landmarks in zip(results.multi_handedness, results.multi_hand_landmarks):
+                # Lấy ID của bàn tay hiện tại trong vòng lặp
+                hand_id = handedness.classification[0].index
+
                 # Bounding box calculation
                 brect = calc_bounding_rect(debug_image, hand_landmarks)
                 # Landmark calculation
                 landmark_list = calc_landmark_list(debug_image, hand_landmarks)
+
+                # 1. Nếu chưa có ai giữ quyền, tay đầu tiên lọt vào đây sẽ "cướp" ID
+                if active_hand_id is None:
+                    active_hand_id = hand_id
+
+                # --- LOGIC ĐIỀU KHIỂN ÂM THANH ---
+                if control_enabled and hand_id == active_hand_id:
+                    if len(landmark_list) >= 9:
+                        # Lấy tọa độ điểm 4 và 8
+                        x1, y1 = landmark_list[4][0], landmark_list[4][1]
+                        x2, y2 = landmark_list[8][0], landmark_list[8][1]
+                        # 1. Giảm độ nhạy bằng cách làm mượt (Exponential Smoothing)
+                        current_dist = np.hypot(x2 - x1, y2 - y1)
+                        smooth_distance = (alpha * current_dist) + ((1 - alpha) * smooth_distance)
+                    
+                        # Vẽ đường nối giữa 2 ngón tay để dễ quan sát
+                        cv.line(debug_image, (x1, y1), (x2, y2), (255, 0, 255), 3)
+                    
+                        # Tính khoảng cách Euclidean
+                        distance = math.hypot(x2 - x1, y2 - y1)
+                    
+                        # Chuyển đổi khoảng cách (pixel) sang mức âm lượng (dB)
+                        # Giả định: 20px là nhỏ nhất, 200px là lớn nhất (tùy độ xa gần webcam)
+                        vol = np.interp(distance, [30, 150], [min_vol, max_vol])
+                        volume.SetMasterVolumeLevel(vol, None)
+                    
+                        # Hiển thị phần trăm âm lượng lên màn hình
+                        # Hiển thị lên màn hình
+                        vol_per = np.interp(distance, [30, 150], [0, 100])
+                        cv.putText(debug_image, f"VOL: {int(vol_per)}%", (10, 150),
+                                   cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                        # Vẽ thêm vòng tròn tại 2 đầu ngón tay để check
+                        cv.circle(debug_image, (x1, y1), 10, (255, 0, 255), cv.FILLED)
+                        cv.circle(debug_image, (x2, y2), 10, (255, 0, 255), cv.FILLED)
+                        cv.line(debug_image, (x1, y1), (x2, y2), (255, 0, 255), 3)
+                # --------------------------------
 
                 # Conversion to relative coordinates / normalized coordinates
                 pre_processed_landmark_list = pre_process_landmark(
@@ -165,13 +270,29 @@ def main():
                     point_history_classifier_labels[most_common_fg_id[0][0]],
                 )
         else:
+            active_hand_id = None
             point_history.append([0, 0])
 
         debug_image = draw_point_history(debug_image, point_history)
         debug_image = draw_info(debug_image, fps, mode, number)
 
-        # Screen reflection
-        cv.imshow('Hand Gesture Recognition', debug_image)
+# 4. Vẽ Menu và Hiển thị (PHẢI THẲNG HÀNG VỚI KHỐI Camera capture)
+        if debug_image is not None:
+            menu_color = (0, 255, 0) if control_enabled else (0, 0, 255)
+            display_msg = "CONTROL: ON" if control_enabled else "CONTROL: OFF"
+            
+            cv.rectangle(debug_image, (5, 65), (280, 110), (0, 0, 0), -1)
+            cv.putText(debug_image, display_msg, (10, 100),
+                       cv.FONT_HERSHEY_SIMPLEX, 1.0, menu_color, 2, cv.LINE_AA)
+            
+            # Hàm draw_info gốc của project
+            debug_image = draw_info(debug_image, fps, mode, number)
+            
+            cv.imshow('Hand Gesture Recognition', debug_image)
+        
+        # Thoát nếu nhấn ESC
+        if cv.waitKey(10) == 27:
+            break
 
     cap.release()
     cv.destroyAllWindows()
