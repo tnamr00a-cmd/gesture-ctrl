@@ -1,16 +1,19 @@
 Gesture Control System 🖐️💻
 ​Dự án này cho phép bạn điều khiển các chức năng của máy tính (như chuột, âm lượng, hoặc phím tắt) thông qua cử chỉ tay từ Webcam. Sử dụng sức mạnh của MediaPipe để nhận diện bàn tay và OpenCV để xử lý hình ảnh.
-​🚀 Tính năng chính
+​
+🚀 Tính năng chính
 ​Điều khiển chuột: Di chuyển con trỏ chuột bằng ngón trỏ.
 ​Click chuột: Thực hiện click trái/phải bằng cách chụm các đầu ngón tay.
 ​Điều khiển âm lượng: Tăng/giảm âm lượng hệ thống bằng khoảng cách giữa ngón cái và ngón trỏ.
 ​Phím tắt: Thực hiện các thao tác như cuộn trang hoặc chuyển tab.
-​🛠️ Cài đặt (Python 3.11.x)
+​
+🛠️ Cài đặt (Python 3.11.x)
 1. Clone repository:
 git clone https://github.com/tnamr00a-cmd/gesture-ctrl.git
 cd gesture-ctrl
 2. Tải thư viện cần thiết:
 pip install -r requirements.txt
+
 📖 Cách sử dụng với app.py
 ​File app.py là trung tâm điều khiển của ứng dụng. Dưới đây là giải thích chi tiết cơ chế hoạt động:
 ​1. Khởi tạo luồng (Initialization)
